@@ -1,6 +1,5 @@
-use tauri::Window;
+use tauri::{Window, Emitter};
 use reqwest::Client;
-use serde_json::Value;
 
 // "The Pivot": Since we can't download code, we backup config and zip local source.
 

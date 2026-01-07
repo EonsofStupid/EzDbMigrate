@@ -37,6 +37,13 @@ pub struct PulseConfig {
     pub custom_repo_mode: bool,
 }
 
+#[derive(serde::Serialize, Clone, Debug)]
+pub struct PulsePackage {
+    pub id: String,
+    pub version: String,
+    pub status: String,
+}
+
 impl Default for PulseConfig {
     fn default() -> Self {
         Self {
