@@ -16,26 +16,62 @@ pub struct GitHubRelease {
     pub assets: Vec<GitHubAsset>,
 }
 
-#[derive(serde::Serialize, Clone)]
-pub struct PulsePackage {
-    pub id: String,
-    pub version: String,
-    pub status: String, // "INSTALLED", "MISSING"
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+pub struct PulseManifest {
+    pub tool: String,
+    pub latest_version: String,
+    pub packages: std::collections::HashMap<String, PulsePackageSpec>,
+    pub message_of_the_day: Option<String>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+pub struct PulsePackageSpec {
+    pub url: String,
+    pub checksum: String, // sha256
+    pub size_mb: f64,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+pub struct PulseConfig {
+    pub manifest_url: String,
+    pub custom_repo_mode: bool,
+}
+
+impl Default for PulseConfig {
+    fn default() -> Self {
+        Self {
+            // "Orbital Depot" Default -> Official Pulse Menu
+            manifest_url: "https://raw.githubusercontent.com/devpulse-tools/drivers/main/manifest.json".to_string(),
+            custom_repo_mode: false,
+        }
+    }
 }
 
 pub struct PulseManager {
     base_path: PathBuf,
     client: reqwest::Client,
+    config: PulseConfig,
 }
 
 impl PulseManager {
     pub fn new(app: &AppHandle) -> Self {
         let app_data = app.path().app_data_dir().unwrap();
         let pulse_root = app_data.join("DevPulse").join("bin");
+        let config_path = app_data.join("DevPulse").join("config.json");
         
         if !pulse_root.exists() {
             let _ = fs::create_dir_all(&pulse_root);
         }
+
+        // Load Config or Create Default
+        let config = if config_path.exists() {
+            let data = fs::read_to_string(&config_path).unwrap_or_default();
+            serde_json::from_str(&data).unwrap_or_default()
+        } else {
+            let def = PulseConfig::default();
+            let _ = fs::write(&config_path, serde_json::to_string_pretty(&def).unwrap());
+            def
+        };
         
         // GitHub requires a User-Agent
         let client = reqwest::Client::builder()
@@ -46,6 +82,7 @@ impl PulseManager {
         Self {
             base_path: pulse_root,
             client,
+            config,
         }
     }
 
@@ -73,7 +110,7 @@ impl PulseManager {
         match self.resolve(package_id, "pg_dump.exe") {
             Ok(_) => PulsePackage {
                 id: package_id.to_string(),
-                version: "detected".to_string(),
+                version: "detected".to_string(), // In future: read local manifest
                 status: "INSTALLED".to_string(),
             },
             Err(_) => PulsePackage {
@@ -108,6 +145,35 @@ impl PulseManager {
 
         // DOWNLOAD
         self.download_and_extract(window, package_id, &asset.browser_download_url).await
+    }
+
+    /// ORBITAL DEPOT LOGIC: Fetch the "Menu"
+    pub async fn fetch_manifest(&self) -> Result<PulseManifest, String> {
+        let resp = self.client.get(&self.config.manifest_url)
+            .send().await.map_err(|e| e.to_string())?;
+        
+        if !resp.status().is_success() {
+            return Err(format!("Depot Unreachable ({})", resp.status()));
+        }
+
+        resp.json().await.map_err(|e| e.to_string())
+    }
+
+    /// Installs the package defined in the manifest for the current OS
+    pub async fn install_latest(&self, window: &Window, package_id: &str) -> Result<(), String> {
+        window.emit("log", "Contacting Orbital Depot...").unwrap();
+        
+        let manifest = self.fetch_manifest().await?;
+        window.emit("log", format!("Manifest Acquired: {} v{}", manifest.tool, manifest.latest_version)).unwrap();
+
+        // OS Detection (Hardcoded to win32-x64 for this Windows-only tool)
+        let target_os = "win32-x64";
+        let pkg_spec = manifest.packages.get(target_os)
+            .ok_or("No package found for this OS in manifest")?;
+
+        window.emit("log", format!("Acquiring Ordnance: {:.2} MB", pkg_spec.size_mb)).unwrap();
+        
+        self.download_and_extract(window, package_id, &pkg_spec.url).await
     }
 
     async fn download_and_extract(&self, window: &Window, package_id: &str, url: &str) -> Result<(), String> {

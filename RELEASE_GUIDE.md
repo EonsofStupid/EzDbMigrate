@@ -46,6 +46,33 @@ Copy these from your local `C:\Program Files\PostgreSQL\15\bin` or extracted Zip
 4.  **Upload**: Drag your `postgres-15-windows-x64.zip` into the assets.
 5.  **Publish**.
 
-## 4. Verification
+## 4. Update the Menu (Orbital Depot)
+The `PulseManager` checks `manifest.json` on the `dptools-deps` repo to find updates.
+
+1.  Create/Update `deps/apps/ezdb/manifest.json`.
+2.  **Structure**:
+    ```json
+    {
+      "tool": "ezdb-migrator",
+      "latest_version": "1.0.0",
+      "packages": {
+        "win32-x64": {
+          "url": "https://github.com/devpulse-tools/drivers/releases/download/v1.0.0/postgres-15-windows-x64.zip",
+          "checksum": "sha256:...", 
+          "size_mb": 15.5
+        }
+      },
+      "message_of_the_day": "Orbital Supplies Ready."
+    }
+    ```
+3.  Commit to `main`.
+
+## 5. Edge Functions (The Pivot)
+> **Note**: We cannot download Function source code from the cloud.
+> The tool backs up **Configuration** (JWT, Vars) via API.
+> The User must **Link Local Source** folder to include logic in the backup.s/latest`.
+It will find the zip, download it, and extract it to `%APPDATA%\DevPulse\bin\postgres-15`.
+
+## 6. Verification
 The app checks `api.github.com/repos/devpulse-tools/drivers/releases/latest`.
 It will find the zip, download it, and extract it to `%APPDATA%\DevPulse\bin\postgres-15`.

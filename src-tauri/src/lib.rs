@@ -3,6 +3,8 @@ use tauri::{Emitter, Window};
 mod auth;
 mod deps;
 mod storage;
+mod functions; // Add module
+
 mod telemetry;
 
 #[tauri::command]
@@ -22,6 +24,39 @@ async fn verify_connection(window: Window, url: String, key: String) -> Result<S
             Err(e)
         }
     }
+}
+
+#[tauri::command]
+async fn backup_edge_config(window: Window, url: String, key: String) -> Result<String, String> {
+    match functions::backup_function_config(&window, &url, &key).await {
+        Ok(configs) => Ok(format!("Secured {} function configs.", configs.len())),
+        Err(e) => Err(format!("Edge Config Backup Failed: {}", e))
+    }
+}
+
+#[tauri::command]
+async fn link_local_source(window: Window, path: String) -> Result<String, String> {
+    functions::zip_local_source(&window, &path)
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
+        .invoke_handler(tauri::generate_handler![
+            verify_connection,
+            check_driver_status,
+            install_drivers,
+            perform_migration,
+            discover_local_databases,
+            backup_database,
+            dry_run_migration,
+            backup_edge_config, // NEW
+            link_local_source   // NEW
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
 }
 
 // Replaces the old Docker check. Now checks for local binaries.
@@ -133,14 +168,13 @@ async fn dry_run_migration(_window: Window, _script: String) -> Result<String, S
 async fn install_drivers(window: Window, app: tauri::AppHandle) -> Result<String, String> {
     let mgr = deps::PulseManager::new(&app);
     
-    // "Brain" Sync: Connects to the public driver repository
-    const REPO_OWNER: &str = "devpulse-tools";
-    const REPO_NAME: &str = "drivers";
-
-    // Fix: Use install_from_github which exists in PulseManager
-    match mgr.install_from_github(&window, "postgres-15", REPO_OWNER, REPO_NAME).await {
+    // ORBITAL DEPOT: Connects to the configured "Menu" (manifest.json)
+    // The URL is loaded from config.json (defaults to devpulse-tools/drivers)
+    
+    // Fix: Use install_latest which reads the manifest
+    match mgr.install_latest(&window, "postgres-15").await {
         Ok(_) => {
-            window.emit("log", "Drivers Installed Successfully.").unwrap();
+            window.emit("log", "Drivers Installed from Depot.").unwrap();
             Ok("INSTALLED".to_string())
         }
         Err(e) => {
