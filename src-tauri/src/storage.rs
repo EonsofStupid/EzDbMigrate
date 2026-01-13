@@ -88,15 +88,31 @@ impl StorageMirror {
             .await
             .map_err(|e| e.to_string())
     }
-
-    // Mock upload for structure - real impl would use streams/files
+    /// Upload object to destination bucket
     pub async fn upload_object(
         &self,
-        _bucket_id: &str,
-        _object_name: &str,
-        _data: Vec<u8>,
+        bucket_id: &str,
+        object_name: &str,
+        data: Vec<u8>,
     ) -> Result<(), String> {
-        // Implement upload logic
+        let url = format!(
+            "{}/storage/v1/object/{}/{}", 
+            self.dest_url, bucket_id, object_name
+        );
+        
+        let response = self.client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.dest_key))
+            .header("Content-Type", "application/octet-stream")
+            .body(data)
+            .send()
+            .await
+            .map_err(|e| format!("Upload failed: {}", e))?;
+        
+        if !response.status().is_success() {
+            return Err(format!("Upload failed with status: {}", response.status()));
+        }
+        
         Ok(())
     }
 }

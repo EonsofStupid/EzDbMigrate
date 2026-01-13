@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "tauri-appdevpulsedb",
+  "productName": "DevPulse",
   "version": "0.1.0",
-  "identifier": "com.devpulsedb.app",
+  "identifier": "app.devpulse.migrate",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -12,9 +12,9 @@
   "app": {
     "windows": [
       {
-        "title": "tauri-appdevpulsedb",
-        "width": 800,
-        "height": 600
+        "title": "DevPulse - EZ Database Migration",
+        "width": 1200,
+        "height": 800
       }
     ],
     "security": {

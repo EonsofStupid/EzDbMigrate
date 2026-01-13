@@ -17,9 +17,29 @@ pub struct GitHubRelease {
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+pub struct PulseChannel {
+    pub version: String,
+    pub required: bool,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+pub struct PulseRollout {
+    pub id: String,
+    pub r#type: String, // "toast", "popup", "modal"
+    pub title: String,
+    pub message: String,
+    pub media_url: Option<String>,
+    pub action_url: Option<String>,
+    pub min_app_version: Option<String>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct PulseManifest {
     pub tool: String,
-    pub latest_version: String,
+    // "Intelligent Channels" - Stable vs Insider
+    pub channels: Option<std::collections::HashMap<String, PulseChannel>>,
+    // "Unwrap Experience" - Media/Toasts
+    pub pulse_rollout: Option<PulseRollout>,
     pub packages: std::collections::HashMap<String, PulsePackageSpec>,
     pub message_of_the_day: Option<String>,
 }
@@ -47,8 +67,8 @@ pub struct PulsePackage {
 impl Default for PulseConfig {
     fn default() -> Self {
         Self {
-            // "Orbital Depot" Default -> Official Pulse Menu
-            manifest_url: "https://raw.githubusercontent.com/devpulse-tools/drivers/main/manifest.json".to_string(),
+            // "Global Platform" SSOT -> dptools-deps Repo
+            manifest_url: "https://raw.githubusercontent.com/devpulse-tools/dptools-deps/main/deps/apps/ezdb/manifest.json".to_string(),
             custom_repo_mode: false,
         }
     }
@@ -171,7 +191,21 @@ impl PulseManager {
         window.emit("log", "Contacting Orbital Depot...").unwrap();
         
         let manifest = self.fetch_manifest().await?;
-        window.emit("log", format!("Manifest Acquired: {} v{}", manifest.tool, manifest.latest_version)).unwrap();
+        
+        // Intelligent Version Resolution
+        let version = if let Some(channels) = &manifest.channels {
+            channels.get("stable").map(|c| c.version.clone()).unwrap_or_else(|| "unknown".to_string())
+        } else {
+            "legacy".to_string()
+        };
+
+        window.emit("log", format!("Manifest Acquired: {} v{}", manifest.tool, version)).unwrap();
+
+        // Intelligent Unwrap (Rollouts)
+        if let Some(rollout) = &manifest.pulse_rollout {
+            window.emit("log", format!("PULSE ROLLOUT: [{}] {}", rollout.r#type.to_uppercase(), rollout.title)).unwrap();
+            // In a real app, this would trigger a frontend event: window.emit("pulse_rollout", rollout);
+        }
 
         // OS Detection (Hardcoded to win32-x64 for this Windows-only tool)
         let target_os = "win32-x64";
