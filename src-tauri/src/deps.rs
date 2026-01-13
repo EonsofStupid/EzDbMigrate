@@ -1,7 +1,7 @@
-use std::path::PathBuf;
 use std::fs;
 use std::io::Cursor;
-use tauri::{AppHandle, Manager, Window, Emitter};
+use std::path::PathBuf;
+use tauri::{AppHandle, Emitter, Manager, Window};
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct GitHubAsset {
@@ -53,8 +53,9 @@ pub struct PulsePackageSpec {
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct PulseConfig {
-    pub manifest_url: String,
-    pub custom_repo_mode: bool,
+    pub channel: String, // "stable", "insider"
+    pub supabase_url: String,
+    pub supabase_key: String, // Public Anon Key
 }
 
 #[derive(serde::Serialize, Clone, Debug)]
@@ -67,9 +68,10 @@ pub struct PulsePackage {
 impl Default for PulseConfig {
     fn default() -> Self {
         Self {
-            // "Global Platform" SSOT -> dptools-deps Repo
-            manifest_url: "https://raw.githubusercontent.com/devpulse-tools/dptools-deps/main/deps/apps/ezdb/manifest.json".to_string(),
-            custom_repo_mode: false,
+            channel: "stable".to_string(),
+            // Pre-configured for DevPulse - User can override in config.json
+            supabase_url: "https://dcmgooupmorhqjbdaxtm.supabase.co".to_string(),
+            supabase_key: "".to_string(), // TODO: Must be provided by user or build arg
         }
     }
 }
@@ -85,7 +87,7 @@ impl PulseManager {
         let app_data = app.path().app_data_dir().unwrap();
         let pulse_root = app_data.join("DevPulse").join("bin");
         let config_path = app_data.join("DevPulse").join("config.json");
-        
+
         if !pulse_root.exists() {
             let _ = fs::create_dir_all(&pulse_root);
         }
@@ -99,8 +101,7 @@ impl PulseManager {
             let _ = fs::write(&config_path, serde_json::to_string_pretty(&def).unwrap());
             def
         };
-        
-        // GitHub requires a User-Agent
+
         let client = reqwest::Client::builder()
             .user_agent("DevPulse-Migrator/1.0")
             .build()
@@ -115,7 +116,7 @@ impl PulseManager {
 
     pub fn resolve(&self, package_id: &str, binary_name: &str) -> Result<PathBuf, String> {
         let pkg_root = self.base_path.join(package_id);
-        
+
         // Search Strategy: Root -> bin -> pgsql/bin -> postgres-[ver]/bin
         let candidates = vec![
             pkg_root.join(binary_name),
@@ -128,8 +129,11 @@ impl PulseManager {
                 return Ok(path);
             }
         }
-        
-        Err(format!("Binary {} not found in package {}", binary_name, package_id))
+
+        Err(format!(
+            "Binary {} not found in package {}",
+            binary_name, package_id
+        ))
     }
 
     pub fn check_package(&self, package_id: &str) -> PulsePackage {
@@ -149,38 +153,131 @@ impl PulseManager {
     }
 
     /// Fetches the latest release from GitHub and installs the matching asset
-    pub async fn install_from_github(&self, window: &Window, package_id: &str, repo_owner: &str, repo_name: &str) -> Result<(), String> {
-        let url = format!("https://api.github.com/repos/{}/{}/releases/latest", repo_owner, repo_name);
-        window.emit("log", format!("Checking updates: {}", url)).unwrap();
+    /// FALLBACK MODE: Direct GitHub access if Supabase is offline
+    pub async fn install_from_github(
+        &self,
+        window: &Window,
+        package_id: &str,
+        repo_owner: &str,
+        repo_name: &str,
+    ) -> Result<(), String> {
+        let url = format!(
+            "https://api.github.com/repos/{}/{}/releases/latest",
+            repo_owner, repo_name
+        );
+        window
+            .emit("log", format!("Checking updates (fallback): {}", url))
+            .unwrap();
 
-        let resp = self.client.get(&url).send().await.map_err(|e| e.to_string())?;
-        
+        let resp = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+
         if !resp.status().is_success() {
-             return Err(format!("GitHub API Error: {}", resp.status()));
+            return Err(format!("GitHub API Error: {}", resp.status()));
         }
 
         let release: GitHubRelease = resp.json().await.map_err(|e| e.to_string())?;
-        window.emit("log", format!("Latest Release: {}", release.tag_name)).unwrap();
+        window
+            .emit("log", format!("Latest Release: {}", release.tag_name))
+            .unwrap();
 
-        // FIND ASSET: Look for "windows" and "zip"
-        // In "True Pro" mode we'd be more strict, but this works for the "Smart" logic
-        let asset = release.assets.iter()
+        let asset = release
+            .assets
+            .iter()
             .find(|a| a.name.to_lowercase().contains("windows") && a.name.ends_with(".zip"))
             .ok_or("No windows compatible asset found in release")?;
 
-        window.emit("log", format!("Found Asset: {} ({:.2} MB)", asset.name, asset.size as f64 / 1024.0 / 1024.0)).unwrap();
+        window
+            .emit(
+                "log",
+                format!(
+                    "Found Asset: {} ({:.2} MB)",
+                    asset.name,
+                    asset.size as f64 / 1024.0 / 1024.0
+                ),
+            )
+            .unwrap();
 
-        // DOWNLOAD
-        self.download_and_extract(window, package_id, &asset.browser_download_url).await
+        self.download_and_extract(window, package_id, &asset.browser_download_url)
+            .await
     }
 
-    /// ORBITAL DEPOT LOGIC: Fetch the "Menu"
-    pub async fn fetch_manifest(&self) -> Result<PulseManifest, String> {
-        let resp = self.client.get(&self.config.manifest_url)
-            .send().await.map_err(|e| e.to_string())?;
-        
+    /// STEP 1: RESOLVE - Ask Supabase "Brain" for the correct Manifest
+    async fn resolve_active_release(&self, window: &Window) -> Result<String, String> {
+        window
+            .emit(
+                "log",
+                format!(
+                    "Pulse Protocol: Syncing with Channel '{}'...",
+                    self.config.channel
+                ),
+            )
+            .unwrap();
+
+        // 1. Construct Query: Select * from pulse_releases where channel_slug = $1 and is_active = true limit 1
+        let query_url = format!(
+            "{}/rest/v1/pulse_releases?channel_slug=eq.{}&is_active=eq.true&select=manifest_url,version,rollout_message&limit=1",
+            self.config.supabase_url, self.config.channel
+        );
+
+        // 2. Execute Query
+        let resp = self
+            .client
+            .get(&query_url)
+            .header("apikey", &self.config.supabase_key)
+            .header(
+                "Authorization",
+                format!("Bearer {}", self.config.supabase_key),
+            )
+            .send()
+            .await
+            .map_err(|e| format!("Network Error: {}", e))?;
+
         if !resp.status().is_success() {
-            return Err(format!("Depot Unreachable ({})", resp.status()));
+            return Err(format!(
+                "Pulse Brain Unreachable ({}). Is Anon Key valid?",
+                resp.status()
+            ));
+        }
+
+        // 3. Parse Response
+        let releases: Vec<serde_json::Value> = resp.json().await.map_err(|e| e.to_string())?;
+        let active = releases
+            .first()
+            .ok_or("No active release found for this channel.")?;
+
+        let manifest_url = active["manifest_url"]
+            .as_str()
+            .ok_or("Invalid Manifest URL")?
+            .to_string();
+        let version = active["version"].as_str().unwrap_or("unknown");
+
+        window
+            .emit(
+                "log",
+                format!("Resolved Release v{} [{}]", version, manifest_url),
+            )
+            .unwrap();
+
+        Ok(manifest_url)
+    }
+
+    /// ORBITAL DEPOT LOGIC: Fetch the "Menu" (Manifest)
+    /// Now accepts a specific URL (resolved from Supabase)
+    pub async fn fetch_manifest(&self, url: &str) -> Result<PulseManifest, String> {
+        let resp = self
+            .client
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+
+        if !resp.status().is_success() {
+            return Err(format!("Manifest Unreachable ({})", resp.status()));
         }
 
         resp.json().await.map_err(|e| e.to_string())
@@ -188,42 +285,92 @@ impl PulseManager {
 
     /// Installs the package defined in the manifest for the current OS
     pub async fn install_latest(&self, window: &Window, package_id: &str) -> Result<(), String> {
-        window.emit("log", "Contacting Orbital Depot...").unwrap();
-        
-        let manifest = self.fetch_manifest().await?;
-        
+        // STEP 1: Resolve (Supabase)
+        let manifest_url = match self.resolve_active_release(window).await {
+            Ok(url) => url,
+            Err(e) => {
+                window
+                    .emit("log", format!("Pulse Protocol Sync Failed: {}", e))
+                    .unwrap();
+                window
+                    .emit("log", "Falling back to hardcoded Depot default...")
+                    .unwrap();
+                "https://raw.githubusercontent.com/devpulse-tools/dptools-deps/main/deps/apps/ezdb/manifest.json".to_string()
+            }
+        };
+
+        // STEP 2: Hydrate (GitHub Manifest)
+        window.emit("log", "Acquiring Manifest...").unwrap();
+        let manifest = self.fetch_manifest(&manifest_url).await?;
+
         // Intelligent Version Resolution
         let version = if let Some(channels) = &manifest.channels {
-            channels.get("stable").map(|c| c.version.clone()).unwrap_or_else(|| "unknown".to_string())
+            channels
+                .get("stable")
+                .map(|c| c.version.clone())
+                .unwrap_or_else(|| "unknown".to_string())
         } else {
             "legacy".to_string()
         };
 
-        window.emit("log", format!("Manifest Acquired: {} v{}", manifest.tool, version)).unwrap();
+        window
+            .emit(
+                "log",
+                format!("Manifest Acquired: {} v{}", manifest.tool, version),
+            )
+            .unwrap();
 
         // Intelligent Unwrap (Rollouts)
         if let Some(rollout) = &manifest.pulse_rollout {
-            window.emit("log", format!("PULSE ROLLOUT: [{}] {}", rollout.r#type.to_uppercase(), rollout.title)).unwrap();
-            // In a real app, this would trigger a frontend event: window.emit("pulse_rollout", rollout);
+            window
+                .emit(
+                    "log",
+                    format!(
+                        "PULSE ROLLOUT: [{}] {}",
+                        rollout.r#type.to_uppercase(),
+                        rollout.title
+                    ),
+                )
+                .unwrap();
+            // TODO: Emit "pulse_rollout" event to frontend
         }
 
+        // STEP 3: Download Binary (GitHub Assets)
         // OS Detection (Hardcoded to win32-x64 for this Windows-only tool)
         let target_os = "win32-x64";
-        let pkg_spec = manifest.packages.get(target_os)
+        let pkg_spec = manifest
+            .packages
+            .get(target_os)
             .ok_or("No package found for this OS in manifest")?;
 
-        window.emit("log", format!("Acquiring Ordnance: {:.2} MB", pkg_spec.size_mb)).unwrap();
-        
-        self.download_and_extract(window, package_id, &pkg_spec.url).await
+        window
+            .emit(
+                "log",
+                format!("Acquiring Ordnance: {:.2} MB", pkg_spec.size_mb),
+            )
+            .unwrap();
+
+        self.download_and_extract(window, package_id, &pkg_spec.url)
+            .await
     }
 
-    async fn download_and_extract(&self, window: &Window, package_id: &str, url: &str) -> Result<(), String> {
+    async fn download_and_extract(
+        &self,
+        window: &Window,
+        package_id: &str,
+        url: &str,
+    ) -> Result<(), String> {
         let target_dir = self.base_path.join(package_id);
-        
+
         window.emit("log", "Initiating Transfer...").unwrap();
-        let response = self.client.get(url).send().await.map_err(|e| e.to_string())?;
+        let response = self
+            .client
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
         let content = response.bytes().await.map_err(|e| e.to_string())?;
-        
+
         window.emit("log", "Extracting Payload...").unwrap();
         let reader = Cursor::new(content);
         let mut archive = zip::ZipArchive::new(reader).map_err(|e| e.to_string())?;
@@ -236,7 +383,9 @@ impl PulseManager {
                 fs::create_dir_all(&outpath).map_err(|e| e.to_string())?;
             } else {
                 if let Some(p) = outpath.parent() {
-                    if !p.exists() { fs::create_dir_all(p).map_err(|e| e.to_string())?; }
+                    if !p.exists() {
+                        fs::create_dir_all(p).map_err(|e| e.to_string())?;
+                    }
                 }
                 let mut outfile = fs::File::create(&outpath).map_err(|e| e.to_string())?;
                 std::io::copy(&mut file, &mut outfile).map_err(|e| e.to_string())?;
